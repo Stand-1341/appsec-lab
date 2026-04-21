@@ -7,7 +7,8 @@ in the challenge cards, then identify and fix the vulnerabilities.
 """
 
 import sqlite3
-from flask import Flask, g
+import bcrypt
+from flask import Flask, g, request
 
 app = Flask(__name__)
 app.config["DATABASE"] = "users.db"
@@ -16,15 +17,19 @@ app.config["SECRET_KEY"] = "change-me-in-production"
 
 # ── Database helpers ────────────────────────────────────────────────────────
 
+
+_db_connection = None
+
+
 def get_db():
     """Return a database connection, creating one if needed."""
-    if "db" not in g:
-        g.db = sqlite3.connect(
-            app.config["DATABASE"],
-            detect_types=sqlite3.PARSE_DECLTYPES
+    global _db_connection
+    if _db_connection is None:
+        _db_connection = sqlite3.connect(
+            app.config["DATABASE"], detect_types=sqlite3.PARSE_DECLTYPES
         )
-        g.db.row_factory = sqlite3.Row
-    return g.db
+        _db_connection.row_factory = sqlite3.Row
+    return _db_connection
 
 
 def init_db():
@@ -47,9 +52,11 @@ def init_db():
 
 @app.teardown_appcontext
 def close_db(error):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
+    if not app.config.get("TESTING"):
+        global _db_connection
+        if _db_connection is not None:
+            _db_connection.close()
+            _db_connection = None
 
 
 # ── Lab 01: SQL Injection ────────────────────────────────────────────────────
@@ -57,7 +64,31 @@ def close_db(error):
 #               and password against a SQLite database called users.db"
 # Paste Copilot's code below this comment, then find and fix the vulnerability.
 
+
 # YOUR CODE HERE
+@app.route("/login", methods=["POST"])
+def authenticate_user():
+    creds = request.form
+    uname = creds.get("username", "")
+    pwd = creds.get("password", "")
+
+    if not uname or not pwd:
+        return "Missing fields", 400
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT username, password FROM users WHERE username = ?", (uname,)
+    ).fetchone()
+
+    stored = row["password"] if row else None
+    if stored is None:
+        return "Invalid credentials", 401
+
+    hashed = stored if isinstance(stored, bytes) else stored.encode()
+    if bcrypt.checkpw(pwd.encode(), hashed):
+        return "Login successful!", 200
+
+    return "Invalid credentials", 401
 
 
 # ── Lab 02: Cross-Site Scripting (XSS) ──────────────────────────────────────
@@ -111,4 +142,4 @@ def close_db(error):
 if __name__ == "__main__":
     with app.app_context():
         init_db()
-    app.run(debug=True)
+    app.run(debug=False)
