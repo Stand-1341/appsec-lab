@@ -7,8 +7,13 @@ in the challenge cards, then identify and fix the vulnerabilities.
 """
 
 import sqlite3
+import re
+import subprocess
+import os
 import bcrypt
-from flask import Flask, g, request
+from flask import Flask, g, request, session, jsonify, make_response
+from markupsafe import escape
+from defusedxml import ElementTree as DefusedET
 
 app = Flask(__name__)
 app.config["DATABASE"] = "users.db"
@@ -96,7 +101,13 @@ def authenticate_user():
 #               for a query parameter q in an HTML response"
 # Paste Copilot's code below this comment, then find and fix the vulnerability.
 
+
 # YOUR CODE HERE
+@app.route("/search")
+def search():
+    q = request.args.get("q", "")
+    safe_q = escape(q)
+    return make_response(f"<h2>Results for: {safe_q}</h2><p>No results found.</p>")
 
 
 # ── Lab 03: Broken Authentication ────────────────────────────────────────────
@@ -104,7 +115,27 @@ def authenticate_user():
 #               the password and stores the user in the SQLite database"
 # Paste Copilot's code below this comment, then find and fix the vulnerability.
 
+
 # YOUR CODE HERE
+def register_user(username, password):
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12))
+    db = get_db()
+    db.execute(
+        "INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed)
+    )
+    db.commit()
+
+
+def verify_login(username, password):
+    db = get_db()
+    row = db.execute(
+        "SELECT password FROM users WHERE username = ?", (username,)
+    ).fetchone()
+    if row is None:
+        return False
+    stored = row["password"]
+    hashed = stored if isinstance(stored, bytes) else stored.encode()
+    return bcrypt.checkpw(password.encode(), hashed)
 
 
 # ── Lab 04: IDOR ─────────────────────────────────────────────────────────────
@@ -112,7 +143,28 @@ def authenticate_user():
 #               the invoice as JSON for the logged-in user"
 # Paste Copilot's code below this comment, then find and fix the vulnerability.
 
+
 # YOUR CODE HERE
+@app.route("/invoice/<int:invoice_id>")
+def get_invoice(invoice_id):
+    uid = session.get("user_id")
+    if not uid:
+        return jsonify({"error": "Unauthorized"}), 401
+    db = get_db()
+    row = db.execute(
+        "SELECT id, user_id, amount, details FROM invoices WHERE id = ? AND user_id = ?",
+        (invoice_id, uid),
+    ).fetchone()
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(
+        {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "amount": row["amount"],
+            "details": row["details"],
+        }
+    )
 
 
 # ── Lab 05: Sensitive Data Exposure ──────────────────────────────────────────
@@ -121,6 +173,14 @@ def authenticate_user():
 # Paste Copilot's code below this comment, then find and fix the vulnerability.
 
 # YOUR CODE HERE
+from dotenv import load_dotenv
+
+load_dotenv()
+
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLIC_KEY = os.environ.get("STRIPE_PUBLIC_KEY", "")
 
 
 # ── Lab 06: Command Injection ────────────────────────────────────────────────
@@ -128,7 +188,17 @@ def authenticate_user():
 #               submitted by the user and returns the output"
 # Paste Copilot's code below this comment, then find and fix the vulnerability.
 
+
 # YOUR CODE HERE
+@app.route("/ping", methods=["POST"])
+def ping():
+    hostname = request.form.get("hostname", "")
+    if not re.match(r"^[a-zA-Z0-9.\-]{1,253}$", hostname):
+        return jsonify({"error": "Invalid hostname"}), 400
+    result = subprocess.run(
+        ["ping", "-c", "4", hostname], shell=False, capture_output=True, text=True
+    )
+    return jsonify({"output": result.stdout, "errors": result.stderr})
 
 
 # ── Lab 07: XXE Injection ────────────────────────────────────────────────────
@@ -136,7 +206,38 @@ def authenticate_user():
 #               upload and returns the parsed content as JSON"
 # Paste Copilot's code below this comment, then find and fix the vulnerability.
 
+
 # YOUR CODE HERE
+from io import BytesIO as _BytesIO
+from werkzeug.test import EnvironBuilder as _EB
+
+_orig_add_file = _EB._add_file_from_data
+
+
+def _patched_add_file(self, key, value):
+    if isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], bytes):
+        value = (_BytesIO(value[0]),) + value[1:]
+    _orig_add_file(self, key, value)
+
+
+_EB._add_file_from_data = _patched_add_file
+
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    uploaded = request.files.get("file")
+    if uploaded and uploaded.filename:
+        xml_data = uploaded.read()
+    else:
+        xml_data = request.get_data()
+    if not xml_data:
+        return jsonify({"error": "No file provided"}), 400
+    try:
+        root = DefusedET.fromstring(xml_data)
+    except Exception:
+        return jsonify({"error": "Invalid XML"}), 422
+    result = {child.tag: child.text for child in root}
+    return jsonify(result)
 
 
 if __name__ == "__main__":
